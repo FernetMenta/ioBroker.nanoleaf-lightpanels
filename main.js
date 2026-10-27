@@ -550,8 +550,10 @@ function getDevice(url, ip, name) {
 function StartPollingTimer() {
 	let interval;
 
-	// if SSE with keep alive polling enables, use keep alive polling interval instead of update polling interval
-	if (SSEenabled && adapter.config.keepAlivePolling) {
+	// when SSE is enabled the polling timer acts only as an HTTP liveness probe (states come via SSE),
+	// so use the keep alive polling interval regardless of the keepAlivePolling option.
+	// Without SSE it drives the actual state updates, so use the update polling interval.
+	if (SSEenabled) {
 		interval = keepAlivePollingInterval * 1000;
 	} else {
 		interval = pollingInterval;
@@ -1629,6 +1631,14 @@ function startAdapterProcessing(deviceInfo) {
 			adapter.log.debug('SSDP notify events initialized!');
 
 			resetKeepAliveTimer();
+
+			// SSDP notify only proves the device is reachable on the network, not that the HTTP control
+			// channel still works. Without this, nothing exercises the OpenAPI between user commands, so a
+			// pooled keep-alive socket can sit idle indefinitely and be silently dead when the next command
+			// reuses it. Run a lightweight getInfo() heartbeat (same mechanism Mode B uses) so the control
+			// channel is exercised periodically and a dead connection is detected and reconnected
+			// (statusUpdate skips writeStates while SSE is active).
+			StartPollingTimer();
 		}
 	} else {
 		// else use polling
@@ -1647,7 +1657,8 @@ function stopAdapterProcessing() {
 		if (adapter.config.keepAlivePolling) {
 			StopPollingTimer();
 		} else {
-			// remove SSDP events only if no polling is active
+			// stop the HTTP heartbeat started alongside the SSDP keep alive
+			StopPollingTimer();
 			// remove SSDP notify events
 			SSDP.removeAllListeners(`DeviceAvailable:${NLdevice.SSDP_NT_ST}`, SSDP_notify);
 			SSDP.removeAllListeners(`DeviceUnavailable:${NLdevice.SSDP_NT_ST}`, SSDP_goodbye);
